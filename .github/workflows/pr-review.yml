@@ -1,0 +1,44 @@
+name: Claude Code Review (Reusable)
+
+on:
+  workflow_call:
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      - name: Check for WIP commit
+        id: check-wip
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%s)
+          echo "Last commit message: $COMMIT_MSG"
+          if [[ "$COMMIT_MSG" == \[wip\]* ]] || [[ "$COMMIT_MSG" == \[WIP\]* ]]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "Skipping review: commit marked as work in progress"
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Claude Code Review
+        if: steps.check-wip.outputs.skip != 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          track_progress: true
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
