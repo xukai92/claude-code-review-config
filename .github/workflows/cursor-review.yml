@@ -46,87 +46,155 @@ jobs:
           git config user.name "Cursor Agent"
           git config user.email "cursoragent@cursor.com"
 
-      - name: Perform automated code review
+      # ── Step 2: Gather context ──────────────────────────────────────────
+      - name: Gather context
         if: steps.check-wip.outputs.skip != 'true'
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
-          MODEL: gpt-5.3-codex
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BLOCKING_REVIEW: ${{ vars.BLOCKING_REVIEW || 'false' }}
         run: |
-          agent --force --model "$MODEL" --output-format=text --print 'You are operating in a GitHub Actions runner performing automated code review. The gh CLI is available and authenticated via GH_TOKEN. You may comment on pull requests.
+          agent --force --model gpt-5.4-mini-medium --output-format=text --print 'You are a context-gathering agent running in a GitHub Actions CI environment. The gh CLI is available and authenticated.
+
+          Your ONLY job is to collect information and write it to /tmp/review-context.json. Do NOT post any comments or reviews.
 
           Context:
           - Repo: ${{ github.repository }}
           - PR Number: ${{ github.event.pull_request.number }}
           - PR Head SHA: ${{ github.event.pull_request.head.sha }}
           - PR Base SHA: ${{ github.event.pull_request.base.sha }}
+
+          Tasks:
+          1) Read any CLAUDE.md, .cursorrules, or similar convention files in the repo root and in each directory that contains changed files. Collect the conventions that are relevant to the changed code.
+
+          2) Get the PR diff: gh pr diff
+
+          3) Get changed files with patches: gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files --paginate --jq ".[] | {filename,patch}"
+
+          4) Get existing review context:
+             - Top-level PR comments: gh pr view --json comments
+             - Review comments and threads: gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate
+             - Submitted reviews: gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews --paginate
+
+          5) Write a JSON file to /tmp/review-context.json with this structure:
+          {
+            "conventions": "string — relevant repo conventions found",
+            "diff": "string — the full PR diff",
+            "changed_files": [ { "filename": "...", "patch": "..." } ],
+            "pr_summary": "string — 2-3 sentence summary of what this PR does and why",
+            "existing_comments": "string — summary of existing review comments, human replies, and resolved threads",
+            "prior_no_issue_comment_ids": [number] — IDs of prior bot comments that say no issues found (matching bodies like: no issues, LGTM, etc)
+          }
+
+          IMPORTANT: Write ONLY valid JSON to /tmp/review-context.json. No markdown, no explanation — just the JSON object.
+          '
+
+      # ── Step 3: Review ──────────────────────────────────────────────────
+      - name: Review code
+        if: steps.check-wip.outputs.skip != 'true'
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+        run: |
+          agent --force --model gpt-5.3-codex --output-format=text --print 'You are a code review agent. You have access to the repo checkout and a context file from a previous step.
+
+          Read /tmp/review-context.json first. It contains the PR diff, changed files with patches, repo conventions, a summary of what changed, and existing review comments.
+
+          Your ONLY job is to find issues and write them to /tmp/review-findings.json. Do NOT post any comments or reviews.
+
+          Review rules:
+          - Analyze ONLY for these 8 categories:
+            1. Null/undefined dereferences
+            2. Resource leaks (unclosed files or connections)
+            3. Injection (SQL/XSS)
+            4. Concurrency/race conditions
+            5. Missing error handling for critical operations
+            6. Obvious logic errors with incorrect behavior
+            7. Clear performance anti-patterns with measurable impact
+            8. Definitive security vulnerabilities
+          - Also check for violations of repo conventions found in the context.
+          - Only flag issues in CHANGED lines (lines with + prefix in the diff).
+          - Skip issues that existing review comments already cover (check the existing_comments field).
+          - Skip issues where a human reply dismissed or acknowledged the concern.
+          - For each issue, self-assess your confidence from 0-100. Be honest — if you are unsure, give a lower score.
+          - Max 10 findings. Prioritize by severity.
+
+          Write /tmp/review-findings.json with this structure:
+          {
+            "findings": [
+              {
+                "file": "path/to/file",
+                "position": <diff_position_integer>,
+                "severity": "critical|security|performance|logic",
+                "emoji": "🚨|🔒|⚡|⚠️",
+                "confidence": <0-100>,
+                "body": "1-2 sentence description, natural tone, specific and actionable"
+              }
+            ],
+            "summary": "string — concise summary of findings or statement that no issues were found"
+          }
+
+          If you find no issues, write: { "findings": [], "summary": "No issues found in the latest changes." }
+
+          IMPORTANT: Write ONLY valid JSON to /tmp/review-findings.json. No markdown, no explanation — just the JSON object.
+          '
+
+      # ── Step 4: Validate and post ───────────────────────────────────────
+      - name: Validate and post review
+        if: steps.check-wip.outputs.skip != 'true'
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BLOCKING_REVIEW: ${{ vars.BLOCKING_REVIEW || 'false' }}
+        run: |
+          agent --force --model gpt-5.4-medium --output-format=text --print 'You are a review validation agent running in GitHub Actions CI. The gh CLI is available and authenticated.
+
+          Context:
+          - Repo: ${{ github.repository }}
+          - PR Number: ${{ github.event.pull_request.number }}
           - Blocking Review: ${{ env.BLOCKING_REVIEW }}
 
-          Objectives:
-          1) Re-check existing review comments and reply resolved when addressed.
-          2) Review the current PR diff and flag only clear, high-severity issues.
-          3) Leave very short inline comments (1-2 sentences) on changed lines only and a brief summary at the end.
+          Read /tmp/review-context.json for the PR context (diff, changed files, prior comments, prior no-issue comment IDs).
+          Read /tmp/review-findings.json for the review findings.
 
-          Procedure:
-          - Get ALL existing review context before analyzing:
-            - Top-level PR comments: gh pr view --json comments
-            - All review comments and their reply threads: gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate
-            - All submitted reviews with their bodies: gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews --paginate
-          - Read and understand the full conversation context. Pay close attention to:
-            - Human replies to review comments — if a reviewer or the PR author has replied saying an issue is not relevant, acknowledged, or already addressed, do NOT re-raise that same issue.
-            - Resolved review threads — do not comment on issues that have already been discussed and dismissed.
-            - Any context from the PR author explaining design decisions or trade-offs.
-          - Get diff: gh pr diff
-          - Get changed files with patches to compute inline positions: gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files --paginate --jq '\''.[] | {filename,patch}'\''
-          - Compute exact inline anchors for each issue (file path + diff position). Comments MUST be placed inline on the changed line in the diff, not as top-level comments.
-          - Detect prior top-level "no issues" style comments authored by this bot (match bodies like: "✅ no issues", "No issues found", "LGTM").
-          - If CURRENT run finds issues and any prior "no issues" comments exist:
-            - Prefer to remove them to avoid confusion:
-              - Try deleting top-level issue comments via: gh api -X DELETE repos/${{ github.repository }}/issues/comments/<comment_id>
-              - If deletion is not possible, minimize them via GraphQL (minimizeComment) or edit to prefix "[Superseded by new findings]".
-            - If neither delete nor minimize is possible, reply to that comment: "⚠️ Superseded: issues were found in newer commits".
-          - If a previously reported issue appears fixed by nearby changes, reply: ✅ This issue appears to be resolved by the recent changes
-          - Analyze ONLY for:
-            - Null/undefined dereferences
-            - Resource leaks (unclosed files or connections)
-            - Injection (SQL/XSS)
-            - Concurrency/race conditions
-            - Missing error handling for critical operations
-            - Obvious logic errors with incorrect behavior
-            - Clear performance anti-patterns with measurable impact
-            - Definitive security vulnerabilities
-          - Avoid duplicates: skip if similar feedback already exists on or near the same lines.
+          Your job is to VALIDATE findings, then POST the results.
 
-          Commenting rules:
-          - Max 10 inline comments total; prioritize the most critical issues
-          - One issue per comment; place on the exact changed line
-          - All issue comments MUST be inline (anchored to a file and line/position in the PR diff)
-          - Natural tone, specific and actionable; do not mention automated or high-confidence
-          - Use emojis: 🚨 Critical 🔒 Security ⚡ Performance ⚠️ Logic ✅ Resolved ✨ Improvement
+          ── Validation ──
+          For each finding with confidence < 90:
+          - Re-read the actual source file at the reported path
+          - Re-examine the diff context around that position
+          - Decide: does this issue actually exist? Is it a real bug/vulnerability?
+          - DROP findings that do not hold up on re-examination
 
-          Signature:
-          - Append a signature at the end of every summary comment and every "no issues" comment.
-          - The signature MUST be on its own lines, separated by a blank line and a Markdown horizontal rule. Use actual newlines, NOT literal backslash-n escape sequences.
-          - Example of correct signature appended to a summary:
-              Some review summary text here.
+          Keep findings with confidence >= 90 as-is (they are high-confidence, no need to re-check).
 
-              ---
-              🤖 *Reviewed by Cursor Agent (gpt-5.3-codex)*
+          ── Handling prior comments ──
+          - If any previously reported issues appear fixed by recent changes, reply to those comments: ✅ This issue appears to be resolved by the recent changes
+          - Check prior_no_issue_comment_ids from the context. If the CURRENT run finds issues and prior "no issues" comments exist:
+            - Try deleting them: gh api -X DELETE repos/${{ github.repository }}/issues/comments/<comment_id>
+            - If deletion fails, reply: ⚠️ Superseded: issues were found in newer commits
 
-          Submission:
-          - ALWAYS submit a comment or review. Never silently skip submission.
-          - EVERY submission MUST have a non-empty body with the signature appended.
-          - If there are NO new issues to report:
-            - Submit a single top-level comment via: gh pr comment ${{ github.event.pull_request.number }} --body "BODY_HERE"
-            - The comment should briefly state no new issues were found in the latest changes and include the signature.
-          - If there ARE issues to report:
-            - Submit ONE review via the GitHub Reviews API containing inline comments and a concise summary body with the signature.
-            - Build a JSON array of comments like: [{ "path": "<file>", "position": <diff_position>, "body": "..." }]
-            - Submit via: gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews -f event=COMMENT -f body="$SUMMARY" -f comments='\''[$COMMENTS_JSON]'\''
+          ── Posting ──
+          Signature (append to every summary and every no-issues comment, on its own lines after a blank line and horizontal rule):
+
+          ---
+          🤖 *Reviewed by Cursor Agent (multi-step: gpt-5.4-mini-medium → gpt-5.3-codex → gpt-5.4-medium)*
+
+          If NO findings survive validation:
+          - Post a single top-level comment: gh pr comment ${{ github.event.pull_request.number }} --body "BODY_HERE"
+          - The body should state no new issues were found, plus the signature.
+
+          If findings DO survive:
+          - Submit ONE review via the GitHub Reviews API with inline comments and a concise summary body with the signature.
+          - Build a JSON array: [{ "path": "<file>", "position": <diff_position>, "body": "<emoji> <body>" }]
+          - Submit: gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews -f event=COMMENT -f body="$SUMMARY" -f comments="[$COMMENTS_JSON]"
           - Do NOT use: gh pr review --approve or --request-changes
 
-          Blocking behavior:
+          Comment rules:
+          - All issue comments MUST be inline (anchored to file and diff position)
+          - One issue per comment
+          - Natural tone, specific and actionable; do not mention confidence scores or automated
+          - Use emojis: 🚨 Critical 🔒 Security ⚡ Performance ⚠️ Logic ✅ Resolved ✨ Improvement
+
+          ── Blocking behavior ──
           - If BLOCKING_REVIEW is true and any 🚨 or 🔒 issues were posted: echo "CRITICAL_ISSUES_FOUND=true" >> $GITHUB_ENV
           - Otherwise: echo "CRITICAL_ISSUES_FOUND=false" >> $GITHUB_ENV
           - Always set CRITICAL_ISSUES_FOUND at the end
