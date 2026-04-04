@@ -1,0 +1,11 @@
+name: Self-test Cursor Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+jobs:
+  cursor-review:
+    uses: ./.github/workflows/cursor-review.yml
+    secrets:
+      CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
