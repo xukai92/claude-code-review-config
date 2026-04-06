@@ -2,6 +2,11 @@ name: Claude Code Review (Reusable)
 
 on:
   workflow_call:
+    inputs:
+      no-nit:
+        description: 'Suppress nit-level feedback (style, naming, theoretical edge cases)'
+        type: boolean
+        default: true
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
@@ -54,5 +59,6 @@ jobs:
 
             Now run the review:
             /code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
+            ${{ inputs.no-nit == true && 'No-nit mode: Only flag substantive issues — bugs, security vulnerabilities, correctness errors, significant design concerns. Skip style preferences, naming nits, theoretical edge cases unlikely in practice, minor refactoring suggestions. If in doubt, do not comment.' || '' }}
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options

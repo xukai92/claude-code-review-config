@@ -2,6 +2,11 @@ name: Cursor Code Review (Reusable)
 
 on:
   workflow_call:
+    inputs:
+      no-nit:
+        description: 'Suppress nit-level feedback (style, naming, theoretical edge cases)'
+        type: boolean
+        default: true
     secrets:
       CURSOR_API_KEY:
         required: true
@@ -52,6 +57,7 @@ jobs:
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NO_NIT: ${{ inputs.no-nit }}
         run: |
           agent --force --model gpt-5.4-mini-medium --output-format=text --print 'You are a context-gathering agent running in a GitHub Actions CI environment. The gh CLI is available and authenticated.
 
@@ -99,7 +105,13 @@ jobs:
         if: steps.check-wip.outputs.skip != 'true'
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          NO_NIT: ${{ inputs.no-nit }}
         run: |
+          NO_NIT_INSTRUCTION=""
+          if [ "$NO_NIT" = "true" ]; then
+            NO_NIT_INSTRUCTION="
+          No-nit mode is ON: Only flag substantive issues — bugs, security vulnerabilities, correctness errors, significant design concerns. Skip style preferences, naming nits, theoretical edge cases unlikely in practice, minor refactoring suggestions. If in doubt, do not comment."
+          fi
           agent --force --model gpt-5.3-codex --output-format=text --print 'You are a code review agent. You have access to the repo checkout and a context file from a previous step.
 
           Read /tmp/review-context.json first. It contains the PR diff, changed files with patches, repo conventions, a summary of what changed, and existing review comments.
@@ -129,6 +141,7 @@ jobs:
 
           - For each issue, self-assess your confidence from 0-100. Be honest — if you are unsure, give a lower score.
           - Max 10 findings. Prioritize by severity.
+          '"$NO_NIT_INSTRUCTION"'
 
           Write /tmp/review-findings.json with this structure:
           {
@@ -214,7 +227,7 @@ jobs:
           - If BLOCKING_REVIEW is true and any 🚨 or 🔒 issues were posted: echo "CRITICAL_ISSUES_FOUND=true" >> $GITHUB_ENV
           - Otherwise: echo "CRITICAL_ISSUES_FOUND=false" >> $GITHUB_ENV
           - Always set CRITICAL_ISSUES_FOUND at the end
-          '
+          '"$NO_NIT_INSTRUCTION"
 
       - name: Check blocking review results
         if: steps.check-wip.outputs.skip != 'true' && vars.BLOCKING_REVIEW == 'true'
