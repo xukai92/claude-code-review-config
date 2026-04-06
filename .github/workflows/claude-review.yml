@@ -43,6 +43,16 @@ jobs:
           track_progress: true
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          prompt: |
+            Before running the review, read ALL existing review comment threads on this PR using:
+              gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate
+              gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews --paginate
+
+            Build a dismissed-issues list: for each comment thread where the PR author replied dismissing, explaining, or acknowledging the concern (e.g. "intentional", "not relevant", "will address later", "by design"), or where the thread was resolved, record the file, line range, and issue summary. These issues are CLOSED and must NOT be re-raised.
+
+            When reviewing, do NOT re-raise any dismissed issue, even if you independently consider it a real problem. Match by semantic similarity — e.g. "TLS verification disabled" and "SSL cert check bypassed" are the same issue. The only exception: new code in a DIFFERENT file/function introducing a new instance of a dismissed pattern.
+
+            Now run the review:
+            /code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options

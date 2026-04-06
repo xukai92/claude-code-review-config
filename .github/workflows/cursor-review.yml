@@ -75,13 +75,19 @@ jobs:
              - Review comments and threads: gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate
              - Submitted reviews: gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews --paginate
 
-          5) Write a JSON file to /tmp/review-context.json with this structure:
+          5) Build a dismissed-issues list:
+             - For EACH review comment thread, check whether the PR author replied dismissing, explaining, or acknowledging the concern (e.g. "intentional", "not relevant", "will address later", "by design", or any reply that indicates the author considered and declined to fix).
+             - Also check if the thread was marked as resolved.
+             - For each such thread, record: { "file": "<path>", "line_range": "<start-end>", "issue_summary": "<what was flagged>", "reason_dismissed": "<author reply or resolved>" }
+
+          6) Write a JSON file to /tmp/review-context.json with this structure:
           {
             "conventions": "string — relevant repo conventions found",
             "diff": "string — the full PR diff",
             "changed_files": [ { "filename": "...", "patch": "..." } ],
             "pr_summary": "string — 2-3 sentence summary of what this PR does and why",
             "existing_comments": "string — summary of existing review comments, human replies, and resolved threads",
+            "dismissed_issues": [ { "file": "...", "line_range": "...", "issue_summary": "...", "reason_dismissed": "..." } ],
             "prior_no_issue_comment_ids": [number] — IDs of prior bot comments that say no issues found (matching bodies like: no issues, LGTM, etc)
           }
 
@@ -113,7 +119,14 @@ jobs:
           - Also check for violations of repo conventions found in the context.
           - Only flag issues in CHANGED lines (lines with + prefix in the diff).
           - Skip issues that existing review comments already cover (check the existing_comments field).
-          - Skip issues where a human reply dismissed or acknowledged the concern.
+
+          ── Dismissed issues (CRITICAL) ──
+          Read the "dismissed_issues" array from the context. These are issues that the PR author has ALREADY reviewed and deliberately declined to fix. Do NOT re-raise ANY of these issues. Specifically:
+          - If a previous reviewer flagged an issue and the author replied explaining why it is intentional, by design, or not relevant — that issue is CLOSED. Do not flag it again, even if you independently consider it a real problem.
+          - If a thread was resolved, do not re-raise the same concern on the same or nearby code.
+          - Match dismissed issues by semantic similarity, not exact text. For example, if "TLS verification disabled" was dismissed, do not re-raise it as "SSL cert check bypassed" — it is the same issue.
+          - The ONLY exception: if NEW code in this push introduces a NEW instance of a dismissed pattern in a DIFFERENT file or function that was not part of the original discussion, you MAY flag the new instance.
+
           - For each issue, self-assess your confidence from 0-100. Be honest — if you are unsure, give a lower score.
           - Max 10 findings. Prioritize by severity.
 
@@ -165,6 +178,9 @@ jobs:
           - DROP findings that do not hold up on re-examination
 
           Keep findings with confidence >= 90 as-is (they are high-confidence, no need to re-check).
+
+          ── Dismissed-issue gate ──
+          Read the "dismissed_issues" array from /tmp/review-context.json. For EACH surviving finding, check whether it matches (by file and semantic similarity) any dismissed issue. DROP any finding that re-raises a previously dismissed concern. This is a hard gate — no exceptions unless the finding is about genuinely new code in a different location.
 
           ── Handling prior comments ──
           - If any previously reported issues appear fixed by recent changes, reply to those comments: ✅ This issue appears to be resolved by the recent changes
