@@ -9,3 +9,10 @@ jobs:
     uses: ./.github/workflows/cursor-review.yml
     secrets:
       CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+
+  cursor-review-cheap:
+    uses: ./.github/workflows/cursor-review.yml
+    with:
+      cheap-mode: true
+    secrets:
+      CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}

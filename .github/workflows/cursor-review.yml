@@ -7,6 +7,11 @@ on:
         description: 'Suppress nit-level feedback (style, naming, theoretical edge cases)'
         type: boolean
         default: true
+      cheap-mode:
+        description: 'Use cheaper Cursor models (gpt-5.4-nano, cursor-composer-2, gpt-5.4-mini-low) instead of the top-tier defaults.'
+        required: false
+        type: boolean
+        default: false
     secrets:
       CURSOR_API_KEY:
         required: true
@@ -51,15 +56,64 @@ jobs:
           git config user.name "Cursor Agent"
           git config user.email "cursoragent@cursor.com"
 
+      - name: Resolve models
+        if: steps.check-wip.outputs.skip != 'true'
+        run: |
+          if [ "${{ inputs.cheap-mode }}" = "true" ]; then
+            M_C=gpt-5.4-nano
+            M_R=cursor-composer-2
+            M_V=gpt-5.4-mini-low
+          else
+            M_C=gpt-5.4-mini-medium
+            M_R=gpt-5.3-codex
+            M_V=gpt-5.4-medium
+          fi
+          echo "MODEL_CONTEXT=$M_C" >> "$GITHUB_ENV"
+          echo "MODEL_REVIEW=$M_R" >> "$GITHUB_ENV"
+          echo "MODEL_VALIDATE=$M_V" >> "$GITHUB_ENV"
+          echo "SIGNATURE_LABEL=multi-step: $M_C → $M_R → $M_V" >> "$GITHUB_ENV"
+
+      - name: Define run-agent helper
+        if: steps.check-wip.outputs.skip != 'true'
+        run: |
+          cat > /tmp/run-agent.sh <<'SHELL_EOF'
+          QUOTA_REGEX='HTTP 429|"code" *: *429|Too Many Requests'
+          run_agent() {
+            local step="$1"; local model="$2"; shift 2
+            local stderr="/tmp/agent-${step}.stderr.log"
+            local rc
+            set +e
+            agent --force --model "$model" "$@" 2> "$stderr"
+            rc=$?
+            set -e
+            cat "$stderr" >&2
+            if [ $rc -ne 0 ] && grep -qiE "$QUOTA_REGEX" "$stderr"; then
+              echo "::warning::Cursor API quota exceeded for ${step} (model=${model}) — retrying with --model auto"
+              set +e
+              agent --force --model auto "$@" 2> "$stderr"
+              rc=$?
+              set -e
+              cat "$stderr" >&2
+              if [ $rc -ne 0 ] && grep -qiE "$QUOTA_REGEX" "$stderr"; then
+                echo "::warning::Cursor API quota also exceeded on --model auto for ${step} — graceful-skip will be posted"
+                echo "QUOTA_EXCEEDED=true" >> "$GITHUB_ENV"
+                return 0
+              fi
+            fi
+            return $rc
+          }
+          SHELL_EOF
+
       # ── Step 2: Gather context ──────────────────────────────────────────
       - name: Gather context
-        if: steps.check-wip.outputs.skip != 'true'
+        if: steps.check-wip.outputs.skip != 'true' && env.QUOTA_EXCEEDED != 'true'
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NO_NIT: ${{ inputs.no-nit }}
         run: |
-          agent --force --model gpt-5.4-mini-medium --output-format=text --print 'You are a context-gathering agent running in a GitHub Actions CI environment. The gh CLI is available and authenticated.
+          source /tmp/run-agent.sh
+          run_agent context "$MODEL_CONTEXT" --output-format=text --print 'You are a context-gathering agent running in a GitHub Actions CI environment. The gh CLI is available and authenticated.
 
           Your ONLY job is to collect information and write it to /tmp/review-context.json. Do NOT post any comments or reviews.
 
@@ -102,7 +156,7 @@ jobs:
 
       # ── Step 3: Review ──────────────────────────────────────────────────
       - name: Review code
-        if: steps.check-wip.outputs.skip != 'true'
+        if: steps.check-wip.outputs.skip != 'true' && env.QUOTA_EXCEEDED != 'true'
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           NO_NIT: ${{ inputs.no-nit }}
@@ -112,7 +166,8 @@ jobs:
             NO_NIT_INSTRUCTION="
           No-nit mode is ON: Only flag substantive issues — bugs, security vulnerabilities, correctness errors, significant design concerns. Skip style preferences, naming nits, theoretical edge cases unlikely in practice, minor refactoring suggestions. If in doubt, do not comment."
           fi
-          agent --force --model gpt-5.3-codex --output-format=text --print 'You are a code review agent. You have access to the repo checkout and a context file from a previous step.
+          source /tmp/run-agent.sh
+          run_agent review "$MODEL_REVIEW" --output-format=text --print 'You are a code review agent. You have access to the repo checkout and a context file from a previous step.
 
           Read /tmp/review-context.json first. It contains the PR diff, changed files with patches, repo conventions, a summary of what changed, and existing review comments.
 
@@ -165,13 +220,21 @@ jobs:
 
       # ── Step 4: Validate and post ───────────────────────────────────────
       - name: Validate and post review
-        if: steps.check-wip.outputs.skip != 'true'
+        if: steps.check-wip.outputs.skip != 'true' && env.QUOTA_EXCEEDED != 'true'
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BLOCKING_REVIEW: ${{ vars.BLOCKING_REVIEW || 'false' }}
+          NO_NIT: ${{ inputs.no-nit }}
         run: |
-          agent --force --model gpt-5.4-medium --output-format=text --print 'You are a review validation agent running in GitHub Actions CI. The gh CLI is available and authenticated.
+          NO_NIT_INSTRUCTION=""
+          if [ "$NO_NIT" = "true" ]; then
+            NO_NIT_INSTRUCTION="
+          No-nit mode is ON: Only flag substantive issues — bugs, security vulnerabilities, correctness errors, significant design concerns. Skip style preferences, naming nits, theoretical edge cases unlikely in practice, minor refactoring suggestions. If in doubt, do not comment."
+          fi
+          SIGNATURE_LINE="🤖 *Reviewed by Cursor Agent (${SIGNATURE_LABEL})*"
+          source /tmp/run-agent.sh
+          run_agent validate "$MODEL_VALIDATE" --output-format=text --print 'You are a review validation agent running in GitHub Actions CI. The gh CLI is available and authenticated.
 
           Context:
           - Repo: ${{ github.repository }}
@@ -205,7 +268,7 @@ jobs:
           Signature (append to every summary and every no-issues comment, on its own lines after a blank line and horizontal rule):
 
           ---
-          🤖 *Reviewed by Cursor Agent (multi-step: gpt-5.4-mini-medium → gpt-5.3-codex → gpt-5.4-medium)*
+          '"$SIGNATURE_LINE"'
 
           If NO findings survive validation:
           - Post a single top-level comment: gh pr comment ${{ github.event.pull_request.number }} --body "BODY_HERE"
@@ -230,7 +293,7 @@ jobs:
           '"$NO_NIT_INSTRUCTION"
 
       - name: Check blocking review results
-        if: steps.check-wip.outputs.skip != 'true' && vars.BLOCKING_REVIEW == 'true'
+        if: steps.check-wip.outputs.skip != 'true' && env.QUOTA_EXCEEDED != 'true' && vars.BLOCKING_REVIEW == 'true'
         run: |
           echo "Checking for critical issues..."
           echo "CRITICAL_ISSUES_FOUND: ${CRITICAL_ISSUES_FOUND:-unset}"
@@ -241,3 +304,12 @@ jobs:
           else
             echo "✅ No blocking issues found."
           fi
+
+      - name: Post graceful-skip comment
+        if: steps.check-wip.outputs.skip != 'true' && env.QUOTA_EXCEEDED == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --body "🤖 *Cursor review unavailable: quota exceeded. Manual review recommended.*"
