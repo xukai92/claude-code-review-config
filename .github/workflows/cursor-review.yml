@@ -73,6 +73,37 @@ jobs:
           echo "MODEL_VALIDATE=$M_V" >> "$GITHUB_ENV"
           echo "SIGNATURE_LABEL=multi-step: $M_C → $M_R → $M_V" >> "$GITHUB_ENV"
 
+      - name: Define run-agent helper
+        if: steps.check-wip.outputs.skip != 'true'
+        run: |
+          cat > /tmp/run-agent.sh <<'SHELL_EOF'
+          QUOTA_REGEX='(^|[^a-z])(http )?429([^0-9]|$)|(quota|rate[ -]?limit|too many requests)'
+          run_agent() {
+            local step="$1"; local model="$2"; shift 2
+            local stderr="/tmp/agent-${step}.stderr.log"
+            local rc
+            set +e
+            agent --force --model "$model" "$@" 2> "$stderr"
+            rc=$?
+            set -e
+            cat "$stderr" >&2
+            if [ $rc -ne 0 ] && grep -qiE "$QUOTA_REGEX" "$stderr"; then
+              echo "::warning::Cursor API quota exceeded for ${step} (model=${model}) — retrying with --model auto"
+              set +e
+              agent --force --model auto "$@" 2> "$stderr"
+              rc=$?
+              set -e
+              cat "$stderr" >&2
+              if [ $rc -ne 0 ] && grep -qiE "$QUOTA_REGEX" "$stderr"; then
+                echo "::warning::Cursor API quota also exceeded on --model auto for ${step} — graceful-skip will be posted"
+                echo "QUOTA_EXCEEDED=true" >> "$GITHUB_ENV"
+                return 0
+              fi
+            fi
+            return $rc
+          }
+          SHELL_EOF
+
       # ── Step 2: Gather context ──────────────────────────────────────────
       - name: Gather context
         if: steps.check-wip.outputs.skip != 'true' && env.QUOTA_EXCEEDED != 'true'
@@ -81,8 +112,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NO_NIT: ${{ inputs.no-nit }}
         run: |
-          set +e
-          agent --force --model "$MODEL_CONTEXT" --output-format=text --print 'You are a context-gathering agent running in a GitHub Actions CI environment. The gh CLI is available and authenticated.
+          source /tmp/run-agent.sh
+          run_agent context "$MODEL_CONTEXT" --output-format=text --print 'You are a context-gathering agent running in a GitHub Actions CI environment. The gh CLI is available and authenticated.
 
           Your ONLY job is to collect information and write it to /tmp/review-context.json. Do NOT post any comments or reviews.
 
@@ -121,18 +152,7 @@ jobs:
           }
 
           IMPORTANT: Write ONLY valid JSON to /tmp/review-context.json. No markdown, no explanation — just the JSON object.
-          ' 2> /tmp/agent-context.stderr.log
-          EXIT_CODE=$?
-          set -e
-          cat /tmp/agent-context.stderr.log >&2
-          if [ $EXIT_CODE -ne 0 ]; then
-            if grep -qiE '(^|[^a-z])(http )?429([^0-9]|$)|(quota|rate[ -]?limit|too many requests)' /tmp/agent-context.stderr.log; then
-              echo "::warning::Cursor API quota exceeded in gather-context step — subsequent steps will be skipped"
-              echo "QUOTA_EXCEEDED=true" >> "$GITHUB_ENV"
-              exit 0
-            fi
-            exit $EXIT_CODE
-          fi
+          '
 
       # ── Step 3: Review ──────────────────────────────────────────────────
       - name: Review code
@@ -146,8 +166,8 @@ jobs:
             NO_NIT_INSTRUCTION="
           No-nit mode is ON: Only flag substantive issues — bugs, security vulnerabilities, correctness errors, significant design concerns. Skip style preferences, naming nits, theoretical edge cases unlikely in practice, minor refactoring suggestions. If in doubt, do not comment."
           fi
-          set +e
-          agent --force --model "$MODEL_REVIEW" --output-format=text --print 'You are a code review agent. You have access to the repo checkout and a context file from a previous step.
+          source /tmp/run-agent.sh
+          run_agent review "$MODEL_REVIEW" --output-format=text --print 'You are a code review agent. You have access to the repo checkout and a context file from a previous step.
 
           Read /tmp/review-context.json first. It contains the PR diff, changed files with patches, repo conventions, a summary of what changed, and existing review comments.
 
@@ -196,18 +216,7 @@ jobs:
           If you find no issues, write: { "findings": [], "summary": "No issues found in the latest changes." }
 
           IMPORTANT: Write ONLY valid JSON to /tmp/review-findings.json. No markdown, no explanation — just the JSON object.
-          ' 2> /tmp/agent-review.stderr.log
-          EXIT_CODE=$?
-          set -e
-          cat /tmp/agent-review.stderr.log >&2
-          if [ $EXIT_CODE -ne 0 ]; then
-            if grep -qiE '(^|[^a-z])(http )?429([^0-9]|$)|(quota|rate[ -]?limit|too many requests)' /tmp/agent-review.stderr.log; then
-              echo "::warning::Cursor API quota exceeded in review step — subsequent steps will be skipped"
-              echo "QUOTA_EXCEEDED=true" >> "$GITHUB_ENV"
-              exit 0
-            fi
-            exit $EXIT_CODE
-          fi
+          '
 
       # ── Step 4: Validate and post ───────────────────────────────────────
       - name: Validate and post review
@@ -224,8 +233,8 @@ jobs:
           No-nit mode is ON: Only flag substantive issues — bugs, security vulnerabilities, correctness errors, significant design concerns. Skip style preferences, naming nits, theoretical edge cases unlikely in practice, minor refactoring suggestions. If in doubt, do not comment."
           fi
           SIGNATURE_LINE="🤖 *Reviewed by Cursor Agent (${SIGNATURE_LABEL})*"
-          set +e
-          agent --force --model "$MODEL_VALIDATE" --output-format=text --print 'You are a review validation agent running in GitHub Actions CI. The gh CLI is available and authenticated.
+          source /tmp/run-agent.sh
+          run_agent validate "$MODEL_VALIDATE" --output-format=text --print 'You are a review validation agent running in GitHub Actions CI. The gh CLI is available and authenticated.
 
           Context:
           - Repo: ${{ github.repository }}
@@ -281,18 +290,7 @@ jobs:
           - If BLOCKING_REVIEW is true and any 🚨 or 🔒 issues were posted: echo "CRITICAL_ISSUES_FOUND=true" >> $GITHUB_ENV
           - Otherwise: echo "CRITICAL_ISSUES_FOUND=false" >> $GITHUB_ENV
           - Always set CRITICAL_ISSUES_FOUND at the end
-          '"$NO_NIT_INSTRUCTION" 2> /tmp/agent-validate.stderr.log
-          EXIT_CODE=$?
-          set -e
-          cat /tmp/agent-validate.stderr.log >&2
-          if [ $EXIT_CODE -ne 0 ]; then
-            if grep -qiE '(^|[^a-z])(http )?429([^0-9]|$)|(quota|rate[ -]?limit|too many requests)' /tmp/agent-validate.stderr.log; then
-              echo "::warning::Cursor API quota exceeded in validate step — graceful-skip comment will be posted"
-              echo "QUOTA_EXCEEDED=true" >> "$GITHUB_ENV"
-              exit 0
-            fi
-            exit $EXIT_CODE
-          fi
+          '"$NO_NIT_INSTRUCTION"
 
       - name: Check blocking review results
         if: steps.check-wip.outputs.skip != 'true' && env.QUOTA_EXCEEDED != 'true' && vars.BLOCKING_REVIEW == 'true'
