@@ -24,8 +24,6 @@ jobs:
       pull-requests: write
       contents: read
       issues: write
-    outputs:
-      quota_exceeded: ${{ steps.expose-quota.outputs.quota_exceeded }}
 
     steps:
       - name: Checkout repository
@@ -129,7 +127,7 @@ jobs:
           cat /tmp/agent-context.stderr.log >&2
           if [ $EXIT_CODE -ne 0 ]; then
             if grep -qiE '(^|[^a-z])(http )?429([^0-9]|$)|(quota|rate[ -]?limit|too many requests)' /tmp/agent-context.stderr.log; then
-              echo "::warning::Cursor API quota exceeded in gather-context step — will retry with --model auto"
+              echo "::warning::Cursor API quota exceeded in gather-context step — subsequent steps will be skipped"
               echo "QUOTA_EXCEEDED=true" >> "$GITHUB_ENV"
               exit 0
             fi
@@ -204,7 +202,7 @@ jobs:
           cat /tmp/agent-review.stderr.log >&2
           if [ $EXIT_CODE -ne 0 ]; then
             if grep -qiE '(^|[^a-z])(http )?429([^0-9]|$)|(quota|rate[ -]?limit|too many requests)' /tmp/agent-review.stderr.log; then
-              echo "::warning::Cursor API quota exceeded in review step — will retry with --model auto"
+              echo "::warning::Cursor API quota exceeded in review step — subsequent steps will be skipped"
               echo "QUOTA_EXCEEDED=true" >> "$GITHUB_ENV"
               exit 0
             fi
@@ -289,7 +287,7 @@ jobs:
           cat /tmp/agent-validate.stderr.log >&2
           if [ $EXIT_CODE -ne 0 ]; then
             if grep -qiE '(^|[^a-z])(http )?429([^0-9]|$)|(quota|rate[ -]?limit|too many requests)' /tmp/agent-validate.stderr.log; then
-              echo "::warning::Cursor API quota exceeded in validate step — will retry with --model auto"
+              echo "::warning::Cursor API quota exceeded in validate step — graceful-skip comment will be posted"
               echo "QUOTA_EXCEEDED=true" >> "$GITHUB_ENV"
               exit 0
             fi
@@ -309,284 +307,11 @@ jobs:
             echo "✅ No blocking issues found."
           fi
 
-      - name: Expose quota status
-        id: expose-quota
-        if: always()
-        run: |
-          echo "quota_exceeded=${QUOTA_EXCEEDED:-false}" >> "$GITHUB_OUTPUT"
-
-  auto-fallback:
-    needs: cursor-review
-    if: github.event.pull_request.draft == false && needs.cursor-review.outputs.quota_exceeded == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      pull-requests: write
-      contents: read
-      issues: write
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha }}
-
-      - name: Install Cursor CLI
-        run: |
-          curl https://cursor.com/install -fsS | bash
-          echo "$HOME/.cursor/bin" >> $GITHUB_PATH
-
-      - name: Configure git identity
-        run: |
-          git config user.name "Cursor Agent"
-          git config user.email "cursoragent@cursor.com"
-
-      - name: Resolve models (auto)
-        run: |
-          echo "MODEL_CONTEXT=auto" >> "$GITHUB_ENV"
-          echo "MODEL_REVIEW=auto" >> "$GITHUB_ENV"
-          echo "MODEL_VALIDATE=auto" >> "$GITHUB_ENV"
-          echo "SIGNATURE_LABEL=auto-fallback after primary quota exceeded" >> "$GITHUB_ENV"
-
-      # ── Step 2: Gather context ──────────────────────────────────────────
-      - name: Gather context
-        if: env.QUOTA_EXCEEDED != 'true'
-        env:
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NO_NIT: ${{ inputs.no-nit }}
-        run: |
-          set +e
-          agent --force --model "$MODEL_CONTEXT" --output-format=text --print 'You are a context-gathering agent running in a GitHub Actions CI environment. The gh CLI is available and authenticated.
-
-          Your ONLY job is to collect information and write it to /tmp/review-context.json. Do NOT post any comments or reviews.
-
-          Context:
-          - Repo: ${{ github.repository }}
-          - PR Number: ${{ github.event.pull_request.number }}
-          - PR Head SHA: ${{ github.event.pull_request.head.sha }}
-          - PR Base SHA: ${{ github.event.pull_request.base.sha }}
-
-          Tasks:
-          1) Read any CLAUDE.md, .cursorrules, or similar convention files in the repo root and in each directory that contains changed files. Collect the conventions that are relevant to the changed code.
-
-          2) Get the PR diff: gh pr diff
-
-          3) Get changed files with patches: gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files --paginate --jq ".[] | {filename,patch}"
-
-          4) Get existing review context:
-             - Top-level PR comments: gh pr view --json comments
-             - Review comments and threads: gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate
-             - Submitted reviews: gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews --paginate
-
-          5) Build a dismissed-issues list:
-             - For EACH review comment thread, check whether the PR author replied dismissing, explaining, or acknowledging the concern (e.g. "intentional", "not relevant", "will address later", "by design", or any reply that indicates the author considered and declined to fix).
-             - Also check if the thread was marked as resolved.
-             - For each such thread, record: { "file": "<path>", "line_range": "<start-end>", "issue_summary": "<what was flagged>", "reason_dismissed": "<author reply or resolved>" }
-
-          6) Write a JSON file to /tmp/review-context.json with this structure:
-          {
-            "conventions": "string — relevant repo conventions found",
-            "diff": "string — the full PR diff",
-            "changed_files": [ { "filename": "...", "patch": "..." } ],
-            "pr_summary": "string — 2-3 sentence summary of what this PR does and why",
-            "existing_comments": "string — summary of existing review comments, human replies, and resolved threads",
-            "dismissed_issues": [ { "file": "...", "line_range": "...", "issue_summary": "...", "reason_dismissed": "..." } ],
-            "prior_no_issue_comment_ids": [number] — IDs of prior bot comments that say no issues found (matching bodies like: no issues, LGTM, etc)
-          }
-
-          IMPORTANT: Write ONLY valid JSON to /tmp/review-context.json. No markdown, no explanation — just the JSON object.
-          ' 2> /tmp/agent-context.stderr.log
-          EXIT_CODE=$?
-          set -e
-          cat /tmp/agent-context.stderr.log >&2
-          if [ $EXIT_CODE -ne 0 ]; then
-            if grep -qiE '(^|[^a-z])(http )?429([^0-9]|$)|(quota|rate[ -]?limit|too many requests)' /tmp/agent-context.stderr.log; then
-              echo "::warning::Cursor API quota also exceeded on auto-fallback (gather-context) — will post graceful-skip comment"
-              echo "QUOTA_EXCEEDED=true" >> "$GITHUB_ENV"
-              exit 0
-            fi
-            exit $EXIT_CODE
-          fi
-
-      # ── Step 3: Review ──────────────────────────────────────────────────
-      - name: Review code
-        if: env.QUOTA_EXCEEDED != 'true'
-        env:
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
-          NO_NIT: ${{ inputs.no-nit }}
-        run: |
-          NO_NIT_INSTRUCTION=""
-          if [ "$NO_NIT" = "true" ]; then
-            NO_NIT_INSTRUCTION="
-          No-nit mode is ON: Only flag substantive issues — bugs, security vulnerabilities, correctness errors, significant design concerns. Skip style preferences, naming nits, theoretical edge cases unlikely in practice, minor refactoring suggestions. If in doubt, do not comment."
-          fi
-          set +e
-          agent --force --model "$MODEL_REVIEW" --output-format=text --print 'You are a code review agent. You have access to the repo checkout and a context file from a previous step.
-
-          Read /tmp/review-context.json first. It contains the PR diff, changed files with patches, repo conventions, a summary of what changed, and existing review comments.
-
-          Your ONLY job is to find issues and write them to /tmp/review-findings.json. Do NOT post any comments or reviews.
-
-          Review rules:
-          - Analyze ONLY for these 8 categories:
-            1. Null/undefined dereferences
-            2. Resource leaks (unclosed files or connections)
-            3. Injection (SQL/XSS)
-            4. Concurrency/race conditions
-            5. Missing error handling for critical operations
-            6. Obvious logic errors with incorrect behavior
-            7. Clear performance anti-patterns with measurable impact
-            8. Definitive security vulnerabilities
-          - Also check for violations of repo conventions found in the context.
-          - Only flag issues in CHANGED lines (lines with + prefix in the diff).
-          - Skip issues that existing review comments already cover (check the existing_comments field).
-
-          ── Dismissed issues (CRITICAL) ──
-          Read the "dismissed_issues" array from the context. These are issues that the PR author has ALREADY reviewed and deliberately declined to fix. Do NOT re-raise ANY of these issues. Specifically:
-          - If a previous reviewer flagged an issue and the author replied explaining why it is intentional, by design, or not relevant — that issue is CLOSED. Do not flag it again, even if you independently consider it a real problem.
-          - If a thread was resolved, do not re-raise the same concern on the same or nearby code.
-          - Match dismissed issues by semantic similarity, not exact text. For example, if "TLS verification disabled" was dismissed, do not re-raise it as "SSL cert check bypassed" — it is the same issue.
-          - The ONLY exception: if NEW code in this push introduces a NEW instance of a dismissed pattern in a DIFFERENT file or function that was not part of the original discussion, you MAY flag the new instance.
-
-          - For each issue, self-assess your confidence from 0-100. Be honest — if you are unsure, give a lower score.
-          - Max 10 findings. Prioritize by severity.
-          '"$NO_NIT_INSTRUCTION"'
-
-          Write /tmp/review-findings.json with this structure:
-          {
-            "findings": [
-              {
-                "file": "path/to/file",
-                "position": <diff_position_integer>,
-                "severity": "critical|security|performance|logic",
-                "emoji": "🚨|🔒|⚡|⚠️",
-                "confidence": <0-100>,
-                "body": "1-2 sentence description, natural tone, specific and actionable"
-              }
-            ],
-            "summary": "string — concise summary of findings or statement that no issues were found"
-          }
-
-          If you find no issues, write: { "findings": [], "summary": "No issues found in the latest changes." }
-
-          IMPORTANT: Write ONLY valid JSON to /tmp/review-findings.json. No markdown, no explanation — just the JSON object.
-          ' 2> /tmp/agent-review.stderr.log
-          EXIT_CODE=$?
-          set -e
-          cat /tmp/agent-review.stderr.log >&2
-          if [ $EXIT_CODE -ne 0 ]; then
-            if grep -qiE '(^|[^a-z])(http )?429([^0-9]|$)|(quota|rate[ -]?limit|too many requests)' /tmp/agent-review.stderr.log; then
-              echo "::warning::Cursor API quota also exceeded on auto-fallback (review) — will post graceful-skip comment"
-              echo "QUOTA_EXCEEDED=true" >> "$GITHUB_ENV"
-              exit 0
-            fi
-            exit $EXIT_CODE
-          fi
-
-      # ── Step 4: Validate and post ───────────────────────────────────────
-      - name: Validate and post review
-        if: env.QUOTA_EXCEEDED != 'true'
-        env:
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BLOCKING_REVIEW: ${{ vars.BLOCKING_REVIEW || 'false' }}
-          NO_NIT: ${{ inputs.no-nit }}
-        run: |
-          NO_NIT_INSTRUCTION=""
-          if [ "$NO_NIT" = "true" ]; then
-            NO_NIT_INSTRUCTION="
-          No-nit mode is ON: Only flag substantive issues — bugs, security vulnerabilities, correctness errors, significant design concerns. Skip style preferences, naming nits, theoretical edge cases unlikely in practice, minor refactoring suggestions. If in doubt, do not comment."
-          fi
-          SIGNATURE_LINE="🤖 *Reviewed by Cursor Agent (${SIGNATURE_LABEL})*"
-          set +e
-          agent --force --model "$MODEL_VALIDATE" --output-format=text --print 'You are a review validation agent running in GitHub Actions CI. The gh CLI is available and authenticated.
-
-          Context:
-          - Repo: ${{ github.repository }}
-          - PR Number: ${{ github.event.pull_request.number }}
-          - Blocking Review: ${{ env.BLOCKING_REVIEW }}
-
-          Read /tmp/review-context.json for the PR context (diff, changed files, prior comments, prior no-issue comment IDs).
-          Read /tmp/review-findings.json for the review findings.
-
-          Your job is to VALIDATE findings, then POST the results.
-
-          ── Validation ──
-          For each finding with confidence < 90:
-          - Re-read the actual source file at the reported path
-          - Re-examine the diff context around that position
-          - Decide: does this issue actually exist? Is it a real bug/vulnerability?
-          - DROP findings that do not hold up on re-examination
-
-          Keep findings with confidence >= 90 as-is (they are high-confidence, no need to re-check).
-
-          ── Dismissed-issue gate ──
-          Read the "dismissed_issues" array from /tmp/review-context.json. For EACH surviving finding, check whether it matches (by file and semantic similarity) any dismissed issue. DROP any finding that re-raises a previously dismissed concern. This is a hard gate — no exceptions unless the finding is about genuinely new code in a different location.
-
-          ── Handling prior comments ──
-          - If any previously reported issues appear fixed by recent changes, reply to those comments: ✅ This issue appears to be resolved by the recent changes
-          - Check prior_no_issue_comment_ids from the context. If the CURRENT run finds issues and prior "no issues" comments exist:
-            - Try deleting them: gh api -X DELETE repos/${{ github.repository }}/issues/comments/<comment_id>
-            - If deletion fails, reply: ⚠️ Superseded: issues were found in newer commits
-
-          ── Posting ──
-          Signature (append to every summary and every no-issues comment, on its own lines after a blank line and horizontal rule):
-
-          ---
-          '"$SIGNATURE_LINE"'
-
-          If NO findings survive validation:
-          - Post a single top-level comment: gh pr comment ${{ github.event.pull_request.number }} --body "BODY_HERE"
-          - The body should state no new issues were found, plus the signature.
-
-          If findings DO survive:
-          - Submit ONE review via the GitHub Reviews API with inline comments and a concise summary body with the signature.
-          - Build a JSON array: [{ "path": "<file>", "position": <diff_position>, "body": "<emoji> <body>" }]
-          - Submit: gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews -f event=COMMENT -f body="$SUMMARY" -f comments="[$COMMENTS_JSON]"
-          - Do NOT use: gh pr review --approve or --request-changes
-
-          Comment rules:
-          - All issue comments MUST be inline (anchored to file and diff position)
-          - One issue per comment
-          - Natural tone, specific and actionable; do not mention confidence scores or automated
-          - Use emojis: 🚨 Critical 🔒 Security ⚡ Performance ⚠️ Logic ✅ Resolved ✨ Improvement
-
-          ── Blocking behavior ──
-          - If BLOCKING_REVIEW is true and any 🚨 or 🔒 issues were posted: echo "CRITICAL_ISSUES_FOUND=true" >> $GITHUB_ENV
-          - Otherwise: echo "CRITICAL_ISSUES_FOUND=false" >> $GITHUB_ENV
-          - Always set CRITICAL_ISSUES_FOUND at the end
-          '"$NO_NIT_INSTRUCTION" 2> /tmp/agent-validate.stderr.log
-          EXIT_CODE=$?
-          set -e
-          cat /tmp/agent-validate.stderr.log >&2
-          if [ $EXIT_CODE -ne 0 ]; then
-            if grep -qiE '(^|[^a-z])(http )?429([^0-9]|$)|(quota|rate[ -]?limit|too many requests)' /tmp/agent-validate.stderr.log; then
-              echo "::warning::Cursor API quota also exceeded on auto-fallback (validate) — will post graceful-skip comment"
-              echo "QUOTA_EXCEEDED=true" >> "$GITHUB_ENV"
-              exit 0
-            fi
-            exit $EXIT_CODE
-          fi
-
-      - name: Check blocking review results
-        if: env.QUOTA_EXCEEDED != 'true' && vars.BLOCKING_REVIEW == 'true'
-        run: |
-          echo "Checking for critical issues..."
-          echo "CRITICAL_ISSUES_FOUND: ${CRITICAL_ISSUES_FOUND:-unset}"
-
-          if [ "${CRITICAL_ISSUES_FOUND:-false}" = "true" ]; then
-            echo "❌ Critical issues found and blocking review is enabled. Failing the workflow."
-            exit 1
-          else
-            echo "✅ No blocking issues found."
-          fi
-
       - name: Post graceful-skip comment
-        if: env.QUOTA_EXCEEDED == 'true'
+        if: steps.check-wip.outputs.skip != 'true' && env.QUOTA_EXCEEDED == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh pr comment ${{ github.event.pull_request.number }} \
             --repo ${{ github.repository }} \
-            --body "🤖 *Cursor review unavailable: quota exceeded for both primary and auto-fallback (\`--model auto\`) attempts. Manual review recommended.*"
+            --body "🤖 *Cursor review unavailable: quota exceeded. Manual review recommended.*"
