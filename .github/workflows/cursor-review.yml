@@ -7,6 +7,11 @@ on:
         description: 'Suppress nit-level feedback (style, naming, theoretical edge cases)'
         type: boolean
         default: true
+      cheap-mode:
+        description: 'Use cheaper Cursor models (gpt-5.4-nano, cursor-composer-2, gpt-5.4-mini-low) instead of the top-tier defaults.'
+        required: false
+        type: boolean
+        default: false
     secrets:
       CURSOR_API_KEY:
         required: true
@@ -51,6 +56,19 @@ jobs:
           git config user.name "Cursor Agent"
           git config user.email "cursoragent@cursor.com"
 
+      - name: Resolve models
+        if: steps.check-wip.outputs.skip != 'true'
+        run: |
+          if [ "${{ inputs.cheap-mode }}" = "true" ]; then
+            echo "MODEL_CONTEXT=gpt-5.4-nano" >> "$GITHUB_ENV"
+            echo "MODEL_REVIEW=cursor-composer-2" >> "$GITHUB_ENV"
+            echo "MODEL_VALIDATE=gpt-5.4-mini-low" >> "$GITHUB_ENV"
+          else
+            echo "MODEL_CONTEXT=gpt-5.4-mini-medium" >> "$GITHUB_ENV"
+            echo "MODEL_REVIEW=gpt-5.3-codex" >> "$GITHUB_ENV"
+            echo "MODEL_VALIDATE=gpt-5.4-medium" >> "$GITHUB_ENV"
+          fi
+
       # ── Step 2: Gather context ──────────────────────────────────────────
       - name: Gather context
         if: steps.check-wip.outputs.skip != 'true'
@@ -59,7 +77,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NO_NIT: ${{ inputs.no-nit }}
         run: |
-          agent --force --model gpt-5.4-mini-medium --output-format=text --print 'You are a context-gathering agent running in a GitHub Actions CI environment. The gh CLI is available and authenticated.
+          agent --force --model "$MODEL_CONTEXT" --output-format=text --print 'You are a context-gathering agent running in a GitHub Actions CI environment. The gh CLI is available and authenticated.
 
           Your ONLY job is to collect information and write it to /tmp/review-context.json. Do NOT post any comments or reviews.
 
@@ -112,7 +130,7 @@ jobs:
             NO_NIT_INSTRUCTION="
           No-nit mode is ON: Only flag substantive issues — bugs, security vulnerabilities, correctness errors, significant design concerns. Skip style preferences, naming nits, theoretical edge cases unlikely in practice, minor refactoring suggestions. If in doubt, do not comment."
           fi
-          agent --force --model gpt-5.3-codex --output-format=text --print 'You are a code review agent. You have access to the repo checkout and a context file from a previous step.
+          agent --force --model "$MODEL_REVIEW" --output-format=text --print 'You are a code review agent. You have access to the repo checkout and a context file from a previous step.
 
           Read /tmp/review-context.json first. It contains the PR diff, changed files with patches, repo conventions, a summary of what changed, and existing review comments.
 
@@ -171,7 +189,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BLOCKING_REVIEW: ${{ vars.BLOCKING_REVIEW || 'false' }}
         run: |
-          agent --force --model gpt-5.4-medium --output-format=text --print 'You are a review validation agent running in GitHub Actions CI. The gh CLI is available and authenticated.
+          SIGNATURE_LINE="🤖 *Reviewed by Cursor Agent (multi-step: ${MODEL_CONTEXT} → ${MODEL_REVIEW} → ${MODEL_VALIDATE})*"
+          agent --force --model "$MODEL_VALIDATE" --output-format=text --print 'You are a review validation agent running in GitHub Actions CI. The gh CLI is available and authenticated.
 
           Context:
           - Repo: ${{ github.repository }}
@@ -205,7 +224,7 @@ jobs:
           Signature (append to every summary and every no-issues comment, on its own lines after a blank line and horizontal rule):
 
           ---
-          🤖 *Reviewed by Cursor Agent (multi-step: gpt-5.4-mini-medium → gpt-5.3-codex → gpt-5.4-medium)*
+          '"$SIGNATURE_LINE"'
 
           If NO findings survive validation:
           - Post a single top-level comment: gh pr comment ${{ github.event.pull_request.number }} --body "BODY_HERE"
