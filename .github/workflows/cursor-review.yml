@@ -17,7 +17,7 @@ on:
         required: true
 
 jobs:
-  primary:
+  cursor-review:
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft == false
     permissions:
@@ -26,7 +26,6 @@ jobs:
       issues: write
     outputs:
       quota_exceeded: ${{ steps.expose-quota.outputs.quota_exceeded }}
-      skipped: ${{ steps.check-wip.outputs.skip }}
 
     steps:
       - name: Checkout repository
@@ -124,11 +123,12 @@ jobs:
           }
 
           IMPORTANT: Write ONLY valid JSON to /tmp/review-context.json. No markdown, no explanation — just the JSON object.
-          ' 2>&1 | tee /tmp/agent-context.log
-          EXIT_CODE=${PIPESTATUS[0]}
+          ' 2> /tmp/agent-context.stderr.log
+          EXIT_CODE=$?
           set -e
+          cat /tmp/agent-context.stderr.log >&2
           if [ $EXIT_CODE -ne 0 ]; then
-            if grep -qiE '429|quota|rate.?limit|too many requests' /tmp/agent-context.log; then
+            if grep -qiE '(^|[^a-z])(http )?429([^0-9]|$)|(quota|rate[ -]?limit|too many requests)' /tmp/agent-context.stderr.log; then
               echo "::warning::Cursor API quota exceeded in gather-context step — will retry with --model auto"
               echo "QUOTA_EXCEEDED=true" >> "$GITHUB_ENV"
               exit 0
@@ -198,11 +198,12 @@ jobs:
           If you find no issues, write: { "findings": [], "summary": "No issues found in the latest changes." }
 
           IMPORTANT: Write ONLY valid JSON to /tmp/review-findings.json. No markdown, no explanation — just the JSON object.
-          ' 2>&1 | tee /tmp/agent-review.log
-          EXIT_CODE=${PIPESTATUS[0]}
+          ' 2> /tmp/agent-review.stderr.log
+          EXIT_CODE=$?
           set -e
+          cat /tmp/agent-review.stderr.log >&2
           if [ $EXIT_CODE -ne 0 ]; then
-            if grep -qiE '429|quota|rate.?limit|too many requests' /tmp/agent-review.log; then
+            if grep -qiE '(^|[^a-z])(http )?429([^0-9]|$)|(quota|rate[ -]?limit|too many requests)' /tmp/agent-review.stderr.log; then
               echo "::warning::Cursor API quota exceeded in review step — will retry with --model auto"
               echo "QUOTA_EXCEEDED=true" >> "$GITHUB_ENV"
               exit 0
@@ -282,11 +283,12 @@ jobs:
           - If BLOCKING_REVIEW is true and any 🚨 or 🔒 issues were posted: echo "CRITICAL_ISSUES_FOUND=true" >> $GITHUB_ENV
           - Otherwise: echo "CRITICAL_ISSUES_FOUND=false" >> $GITHUB_ENV
           - Always set CRITICAL_ISSUES_FOUND at the end
-          '"$NO_NIT_INSTRUCTION" 2>&1 | tee /tmp/agent-validate.log
-          EXIT_CODE=${PIPESTATUS[0]}
+          '"$NO_NIT_INSTRUCTION" 2> /tmp/agent-validate.stderr.log
+          EXIT_CODE=$?
           set -e
+          cat /tmp/agent-validate.stderr.log >&2
           if [ $EXIT_CODE -ne 0 ]; then
-            if grep -qiE '429|quota|rate.?limit|too many requests' /tmp/agent-validate.log; then
+            if grep -qiE '(^|[^a-z])(http )?429([^0-9]|$)|(quota|rate[ -]?limit|too many requests)' /tmp/agent-validate.stderr.log; then
               echo "::warning::Cursor API quota exceeded in validate step — will retry with --model auto"
               echo "QUOTA_EXCEEDED=true" >> "$GITHUB_ENV"
               exit 0
@@ -314,8 +316,8 @@ jobs:
           echo "quota_exceeded=${QUOTA_EXCEEDED:-false}" >> "$GITHUB_OUTPUT"
 
   auto-fallback:
-    needs: primary
-    if: needs.primary.outputs.quota_exceeded == 'true'
+    needs: cursor-review
+    if: github.event.pull_request.draft == false && needs.cursor-review.outputs.quota_exceeded == 'true'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
@@ -394,11 +396,12 @@ jobs:
           }
 
           IMPORTANT: Write ONLY valid JSON to /tmp/review-context.json. No markdown, no explanation — just the JSON object.
-          ' 2>&1 | tee /tmp/agent-context.log
-          EXIT_CODE=${PIPESTATUS[0]}
+          ' 2> /tmp/agent-context.stderr.log
+          EXIT_CODE=$?
           set -e
+          cat /tmp/agent-context.stderr.log >&2
           if [ $EXIT_CODE -ne 0 ]; then
-            if grep -qiE '429|quota|rate.?limit|too many requests' /tmp/agent-context.log; then
+            if grep -qiE '(^|[^a-z])(http )?429([^0-9]|$)|(quota|rate[ -]?limit|too many requests)' /tmp/agent-context.stderr.log; then
               echo "::warning::Cursor API quota also exceeded on auto-fallback (gather-context) — will post graceful-skip comment"
               echo "QUOTA_EXCEEDED=true" >> "$GITHUB_ENV"
               exit 0
@@ -468,11 +471,12 @@ jobs:
           If you find no issues, write: { "findings": [], "summary": "No issues found in the latest changes." }
 
           IMPORTANT: Write ONLY valid JSON to /tmp/review-findings.json. No markdown, no explanation — just the JSON object.
-          ' 2>&1 | tee /tmp/agent-review.log
-          EXIT_CODE=${PIPESTATUS[0]}
+          ' 2> /tmp/agent-review.stderr.log
+          EXIT_CODE=$?
           set -e
+          cat /tmp/agent-review.stderr.log >&2
           if [ $EXIT_CODE -ne 0 ]; then
-            if grep -qiE '429|quota|rate.?limit|too many requests' /tmp/agent-review.log; then
+            if grep -qiE '(^|[^a-z])(http )?429([^0-9]|$)|(quota|rate[ -]?limit|too many requests)' /tmp/agent-review.stderr.log; then
               echo "::warning::Cursor API quota also exceeded on auto-fallback (review) — will post graceful-skip comment"
               echo "QUOTA_EXCEEDED=true" >> "$GITHUB_ENV"
               exit 0
@@ -552,11 +556,12 @@ jobs:
           - If BLOCKING_REVIEW is true and any 🚨 or 🔒 issues were posted: echo "CRITICAL_ISSUES_FOUND=true" >> $GITHUB_ENV
           - Otherwise: echo "CRITICAL_ISSUES_FOUND=false" >> $GITHUB_ENV
           - Always set CRITICAL_ISSUES_FOUND at the end
-          '"$NO_NIT_INSTRUCTION" 2>&1 | tee /tmp/agent-validate.log
-          EXIT_CODE=${PIPESTATUS[0]}
+          '"$NO_NIT_INSTRUCTION" 2> /tmp/agent-validate.stderr.log
+          EXIT_CODE=$?
           set -e
+          cat /tmp/agent-validate.stderr.log >&2
           if [ $EXIT_CODE -ne 0 ]; then
-            if grep -qiE '429|quota|rate.?limit|too many requests' /tmp/agent-validate.log; then
+            if grep -qiE '(^|[^a-z])(http )?429([^0-9]|$)|(quota|rate[ -]?limit|too many requests)' /tmp/agent-validate.stderr.log; then
               echo "::warning::Cursor API quota also exceeded on auto-fallback (validate) — will post graceful-skip comment"
               echo "QUOTA_EXCEEDED=true" >> "$GITHUB_ENV"
               exit 0
