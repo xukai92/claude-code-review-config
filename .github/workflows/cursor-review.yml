@@ -7,8 +7,8 @@ on:
         description: 'Suppress nit-level feedback (style, naming, theoretical edge cases)'
         type: boolean
         default: true
-      cheap-mode:
-        description: 'Use cheaper Cursor models (gpt-5.4-nano, cursor-composer-2, gpt-5.4-mini-low) instead of the top-tier defaults.'
+      expert-mode:
+        description: 'Use top-tier Cursor models (gpt-5.4-mini-medium, gpt-5.3-codex, gpt-5.4-medium) instead of the cost-effective defaults.'
         required: false
         type: boolean
         default: false
@@ -59,14 +59,14 @@ jobs:
       - name: Resolve models
         if: steps.check-wip.outputs.skip != 'true'
         run: |
-          if [ "${{ inputs.cheap-mode }}" = "true" ]; then
-            M_C=gpt-5.4-nano
-            M_R=cursor-composer-2
-            M_V=gpt-5.4-mini-low
-          else
+          if [ "${{ inputs.expert-mode }}" = "true" ]; then
             M_C=gpt-5.4-mini-medium
             M_R=gpt-5.3-codex
             M_V=gpt-5.4-medium
+          else
+            M_C=gpt-5.4-nano
+            M_R=cursor-composer-2
+            M_V=gpt-5.4-mini-low
           fi
           echo "MODEL_CONTEXT=$M_C" >> "$GITHUB_ENV"
           echo "MODEL_REVIEW=$M_R" >> "$GITHUB_ENV"
