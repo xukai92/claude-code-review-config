@@ -77,24 +77,24 @@ jobs:
         if: steps.check-wip.outputs.skip != 'true'
         run: |
           cat > /tmp/run-agent.sh <<'SHELL_EOF'
-          QUOTA_REGEX='HTTP 429|"code" *: *429|Too Many Requests'
+          QUOTA_REGEX='HTTP 429|"code" *: *429|Too Many Requests|out of usage|out of fast requests|Switch to Auto'
           run_agent() {
             local step="$1"; local model="$2"; shift 2
-            local stderr="/tmp/agent-${step}.stderr.log"
+            local logfile="/tmp/agent-${step}.log"
             local rc
             set +e
-            agent --force --model "$model" "$@" 2> "$stderr"
+            agent --force --model "$model" "$@" > >(tee /tmp/agent-${step}.stdout.log) 2> >(tee /tmp/agent-${step}.stderr.log >&2)
             rc=$?
             set -e
-            cat "$stderr" >&2
-            if [ $rc -ne 0 ] && grep -qiE "$QUOTA_REGEX" "$stderr"; then
+            cat /tmp/agent-${step}.stdout.log /tmp/agent-${step}.stderr.log > "$logfile"
+            if [ $rc -ne 0 ] && grep -qiE "$QUOTA_REGEX" "$logfile"; then
               echo "::warning::Cursor API quota exceeded for ${step} (model=${model}) — retrying with --model auto"
               set +e
-              agent --force --model auto "$@" 2> "$stderr"
+              agent --force --model auto "$@" > >(tee /tmp/agent-${step}.stdout.log) 2> >(tee /tmp/agent-${step}.stderr.log >&2)
               rc=$?
               set -e
-              cat "$stderr" >&2
-              if [ $rc -ne 0 ] && grep -qiE "$QUOTA_REGEX" "$stderr"; then
+              cat /tmp/agent-${step}.stdout.log /tmp/agent-${step}.stderr.log > "$logfile"
+              if [ $rc -ne 0 ] && grep -qiE "$QUOTA_REGEX" "$logfile"; then
                 echo "::warning::Cursor API quota also exceeded on --model auto for ${step} — graceful-skip will be posted"
                 echo "QUOTA_EXCEEDED=true" >> "$GITHUB_ENV"
                 return 0
