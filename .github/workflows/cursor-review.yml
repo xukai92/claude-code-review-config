@@ -64,7 +64,7 @@ jobs:
             M_R=gpt-5.3-codex
             M_V=gpt-5.4-medium
           else
-            M_C=gpt-5.4-nano
+            M_C=gpt-5.4-nano-low
             M_R=cursor-composer-2
             M_V=gpt-5.4-mini-low
           fi
